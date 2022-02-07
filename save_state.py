@@ -1,20 +1,28 @@
 import threading
+import subprocess
+import signal
+import random
+import string
+import select
+import sys
+import os
+
+
+def generate_name():
+    return "".join([random.choices(string.ascii_lowercase)[0] for x in range(8)])
+
+
+def convert2boolean(arg):
+    if not isinstance(arg, bool):
+        return arg.lower() in ("yes", "true", "t", "1", "y")
+    return arg
 
 
 def run_container(name="ubuntu", entrypoint="bash"):
-    """ This function starts an interactive session with a container of interest.
+    """This function starts an interactive session with a container of interest.
     Run with threading, we can know when the container is exited for a final save.
     """
-    import random
-    import string
     import pty
-    import subprocess
-    import select
-    import sys
-    import os
-
-    def generate_name():
-        return "".join([random.choices(string.ascii_lowercase)[0] for x in range(8)])
 
     # This is ensuring every based image has just one saved name. This could
     # be managed more elegantly.
@@ -29,6 +37,20 @@ def run_container(name="ubuntu", entrypoint="bash"):
 
     # Keep updating the terminal until the user is done!
     # This is where we can read in commands and respond to user requests
+    while True:
+        try:
+            return command_listen(p, pty, name, random_name)
+        except KeyboardInterrupt:
+            print("\nOops, we don't support Control+C yet!")
+
+    # An non-intentional exit?
+    return random_name
+
+
+def command_listen(p, pty, name, random_name):
+    """
+    A wrapper to listen to and respond to terminal commands.
+    """
     while p.poll() is None:
         r, _, _ = select.select([sys.stdin, pty], [], [])
         if sys.stdin in r:
@@ -38,13 +60,13 @@ def run_container(name="ubuntu", entrypoint="bash"):
             if "#save" in input_from_terminal.decode("utf-8"):
                 save_container(name, random_name)
                 os.write(sys.stdout.fileno(), b"Saving container...\n")
+            elif "exit" in input_from_terminal.decode("utf-8"):
+                print("Container exited.")
+                return random_name
             os.write(pty, input_from_terminal)
         elif pty in r:
             output_from_docker = os.read(pty, 10240)
             os.write(sys.stdout.fileno(), output_from_docker)
-
-    print("Container exited.")
-    return random_name
 
 
 def save_container(name, container_name, suffix="-saved"):
@@ -56,33 +78,43 @@ def save_container(name, container_name, suffix="-saved"):
     import tempfile
     import os
 
+    # A temporary name (probably this should be random!)
+    tmp_name = container_name + "-tmp"
+
     # Probably this should be random!
-    p = subprocess.Popen(["docker", "commit", container_name, container_name + "-tmp"])
+    p = subprocess.Popen(["docker", "commit", container_name, tmp_name])
     p.wait()
+
+    # Keep track of where we are to change back to
+    here = os.getcwd()
 
     # Create a temporary context
     tempdir = tempfile.mkdtemp()
     dockerfile = os.path.join(tempdir, "Dockerfile")
     with open(dockerfile, "w") as fd:
-        fd.write("FROM %s-tmp\n" % container_name)
+        fd.write("FROM %s\n" % tmp_name)
     os.chdir(tempdir)
     p = subprocess.Popen(["docker", "build", "--squash", "-t", name + suffix, "."])
     p.wait()
+    p = subprocess.Popen(["docker", "rmi", tmp_name])
+    p.wait()
+
+    # Remove dangling None images (not recommended lol)
+    os.system('docker rmi $(docker images --filter "dangling=true" -q --no-trunc)')
+    os.chdir(here)
     shutil.rmtree(tempdir)
 
 
 def main():
-    """ Start a thread to run the container, and we can run other tasks too.
-    """
+    """Start a thread to run the container, and we can run other tasks too."""
     # threading.Thread(target=run_container, name='run-container').start()
     # Perform other tasks while the thread is running.
     name = run_container()
 
-    # Stop and remove the temporary container.
-    p = subprocess.Popen(["docker", "stop", name])
-    p.wait()
-    p = subprocess.Popen(["docker", "rm", name])
-    p.wait()
+    # Remove the temporary container.
+    if name:
+        p = subprocess.Popen(["docker", "stop", name])
+        p.wait()
 
 
 if __name__ == "__main__":
